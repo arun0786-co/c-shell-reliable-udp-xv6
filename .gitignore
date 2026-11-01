@@ -1,0 +1,11 @@
+.DS_Store
+*.o
+*.dSYM/
+llm_completions/
+shell/shell.out
+network/server
+network/client
+network/*.log
+network/server_log.txt
+network/client_log.txt
+network/received_file*
