@@ -1,545 +1,140 @@
-Mini Project 1 – Shell, Networking (S.H.A.M), and xv6
+# C shell, reliable UDP and xv6 schedulers
 
-Project layout
+Three systems programs in C, written for Mini Project 1 of Operating Systems
+and Networks at IIIT Hyderabad (2025) and reworked later:
 
-- shell/
-  - src/, include/, Makefile
-  - Builds to shell/shell.out
-- networking/
-  - client.c, server.c, sham.h, Makefile, README.md
-- xv6/
-  - xv6_modifications.patch (ONLY files changed), report.md, readcount.c
-- tester/
-  - test.py, requirements.txt (local basic shell tests)
+- `shell/`: a shell with pipes, redirection and job control
+- `network/`: S.H.A.M., a reliable byte stream over UDP
+- `xv6/`: a `getreadcount` system call and extra schedulers for xv6, as a patch
 
-Build and test – Shell
+## Shell
 
-# C Shell Implementation
-
-A complete POSIX-compliant shell implementation in C, supporting advanced features like job control, signal handling, command history, and complex command parsing.
-
-## 📋 Project Overview
-
-This project implements a fully functional shell with the following major components:
-- **Part A**: Basic shell functionality (prompt, input parsing, grammar validation)
-- **Part B**: Built-in commands (hop, reveal, log)
-- **Part C**: File redirection and pipes
-- **Part D**: Sequential and background execution
-- **Part E**: Advanced job control and signal handling
-
-## 🔧 Build Instructions
-
-```bash
-make clean    # Clean build artifacts
-make all      # Compile the shell
+```
+cd shell
+make all        # builds shell.out with the course's strict POSIX flags
+./shell.out
 ```
 
-The makefile uses strict POSIX compliance flags:
-```makefile
-CFLAGS = -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -Wall -Wextra -Werror -Wno-unused-parameter -fno-asm
+The directory the shell starts in is its home, shown as `~` in the prompt
+`<user@host:path>`.
+
+| Feature | Notes |
+|---|---|
+| Syntax check | prints `Invalid Syntax!` for input outside the grammar below |
+| Programs | anything on `PATH`, or a path such as `/bin/echo` |
+| `<`, `>`, `>>` | applied left to right, so the last one of each kind wins |
+| `\|` | one process per command, all started before the shell waits |
+| `;` and `&` | sequential and background groups |
+| `hop [dir...]` | change directory; `~`, `.`, `..`, `-` and paths, applied in order |
+| `reveal [-a] [-l] [dir]` | list a directory in ASCII order |
+| `log`, `log purge`, `log execute <n>` | last 15 commands, kept in `~/.shell_history` |
+| `activities` | running and stopped jobs, sorted by command |
+| `ping <pid> <signal>` | send signal `n % 32` to a process |
+| `fg [n]`, `bg [n]` | resume a job in the foreground or background |
+| Ctrl-C, Ctrl-Z | interrupt or stop the foreground job, never the shell |
+| Ctrl-D | print `logout`, kill all jobs and exit |
+
+Grammar:
+
+```
+shell_cmd -> cmd_group ((& | ;) cmd_group)* &?
+cmd_group -> atomic (| atomic)*
+atomic    -> name (name | input | output)*
+input     -> < name
+output    -> > name | >> name
 ```
 
-## 📚 Implementation Details
+### How it works
 
-### Part A: Shell Input (65 points)
+- `parser.c` splits the line into tokens, then walks them with one function
+  per grammar rule. The same pass checks the syntax and builds a tree:
+  a line holds groups, a group holds piped commands, a command holds its
+  arguments and redirections.
+- `executor.c` runs that tree, and every line goes through it. A builtin that
+  is alone in a foreground group runs inside the shell, so `hop` changes the
+  shell's own directory. Anywhere else (in a pipe, or with `&`) it runs in a
+  child, as in bash. A group becomes one job: one process per command, joined
+  by pipes, all in one process group. Pipes are connected first and
+  redirections applied after, so `ls > f | wc -l` writes the listing to `f`
+  and `wc` counts 0.
+- `jobs.c` does job control. The foreground job's process group is given the
+  terminal with `tcsetpgrp`, so Ctrl-C and Ctrl-Z from the keyboard reach the
+  job and not the shell. A background job that reads the terminal is stopped
+  by the kernel with SIGTTIN. The shell's own SIGINT and SIGTSTP handlers
+  (installed with `sigaction` and `SA_RESTART`) pass the signal on to the
+  foreground job, which covers signals sent to the shell's pid. Status
+  changes of background jobs are collected with
+  `waitpid(-pgid, WNOHANG | WUNTRACED | WCONTINUED)` before each prompt and
+  after each line of input.
+- Errors go to stderr, so a pipe never carries them to the next command.
 
-#### A.1: Shell Prompt (10 points)
-**Implementation**: `display_prompt()` in `main.c`
+### Changes from the submitted version
 
-**Key Features**:
-- Dynamic username and hostname detection using environment variables
-- Home directory replacement with `~` symbol
-- Proper memory management for path display
+The course autograder's 125 test cases were replayed against the shell on
+Linux. The submitted version passed 85; this one passes 121. The four left
+are described in the next section.
 
-**Challenges & Solutions**:
-- **Challenge**: Handling cases where environment variables might be NULL
-- **Solution**: Implemented fallback values and proper NULL checking
-- **Challenge**: Memory management for path manipulation
-- **Solution**: Careful allocation and deallocation of display paths
+- Background jobs never printed `[n] pid`: the line had been commented out.
+  That failed every background test and most job-control tests.
+- Any command that was not found crashed the shell with
+  `free(): invalid pointer`. The PATH list was built without a NULL at the
+  end, and the loop that freed it walked past the end.
+- A line was parsed and run by one of three different code paths, chosen by
+  which characters it contained. Builtins existed only in one of them, so
+  `hop dir ; pwd` printed `Command not found!`.
+- Signal handlers were installed with `signal()`. Under the strict POSIX
+  flags glibc gives that the old System V behaviour: the handler is reset
+  after one signal and interrupted calls fail with EINTR, which showed up as
+  `waitpid: Interrupted system call`. The handlers were also empty, and jobs
+  had no process groups, so Ctrl-Z, `fg` and `bg` could not work.
+- The parser accepted a trailing `;`, and accepted `cmd < > file` because a
+  failed alternative did not rewind its position.
+- `hop` stopped at the first bad directory. `reveal -` treated `-` as an
+  empty flag list, `reveal ..` used the first `/` instead of the last,
+  sorting ignored case, and `reveal` with no argument listed home instead of
+  the current directory.
+- `log execute` parsed the command and threw it away. Out-of-range indexes
+  printed the wrong message, and the history filter skipped every command
+  starting with the letters `log`.
+- `/bin/echo` was not found, because the name was always joined to each
+  PATH directory. With `cat < missing < file` only the last file was opened,
+  so the command ran when it should not have.
+- `ping 123 abc` used `atoi`, which turned `abc` into signal 0.
+- Arguments lived in fixed 64-entry arrays filled without a bounds check:
+  `echo` with 70 arguments piped into `wc` wrote past the end of the heap
+  buffer. All arrays now grow as needed.
 
-```c
-void display_prompt(char* home_dir) {
-    char* username = my_getenv("USER", environ);
-    char* hostname = my_getenv("HOSTNAME", environ);
-    char* current_dir = getcwd(NULL, 0);
-    
-    // Handle NULL environment variables
-    if (!username) username = "arun";
-    if (!hostname) hostname = "iiith";
-    
-    // Replace home directory with ~
-    // ... path manipulation logic
-}
+### Tests that disagree with the spec
+
+- Tests 44 and 47 expect `hop test/folder1 bad test/folder2` to end in
+  `test/folder2` from the starting directory, which means resolving every
+  argument against the directory `hop` started in. The spec applies the
+  arguments one after another (its example `hop rudy/osnmp1 .. -` goes
+  into a folder, up one level and back), so `test/folder2` is looked up
+  inside `test/folder1` and fails.
+- Tests 64 and 66 expect `pwd` to be missing from the history. The spec says
+  to store every command that does not run `log`, and the course tester's
+  own transcript of those tests shows `pwd` in the `log` output.
+
+## Networking: S.H.A.M.
+
+A reliable byte stream over UDP with a three-way handshake, sequence numbers,
+cumulative ACKs, retransmission on timeout, a sliding window, simulated
+packet loss and a chat mode.
+
 ```
-
-#### A.2: User Input 
-**Implementation**: `getline()` in main shell loop
-
-**Key Features**:
-- Continuous input loop with proper EOF handling
-- Input sanitization and newline removal
-
-#### A.3: Input Parsing 
-**Implementation**: `parse_shell_cmd()` and related functions in `parser.c`
-
-**Grammar Implementation**:
-```
-shell_cmd  ->  cmd_group ((& | ;) cmd_group)* &?
-cmd_group ->  atomic (\| atomic)*
-atomic -> name (name | input | output)*
-input -> < name | <name
-output -> > name | >name | >> name | >>name
-name -> r"[^|&><;\s]+"
-```
-
-**Key Functions**:
-- `parse_shell_cmd()`: Main grammar validator
-- `parse_cmd_group()`: Handles pipe-separated commands
-- `parse_atomic()`: Parses individual commands with redirections
-- `parse_input_redirection()`: Handles `<` redirection
-- `parse_output_redirection()`: Handles `>` and `>>` redirection
-
-**Challenges & Solutions**:
-- **Challenge**: Complex grammar validation with proper error handling
-- **Solution**: Recursive descent parsing with comprehensive error checking
-- **Challenge**: Whitespace handling between tokens
-- **Solution**: Implemented `is_whitespace()` function and proper token skipping
-
-### Part B: Shell Intrinsics
-
-#### B.1: hop Command 
-**Implementation**: `command_hop()` in `builtins.c`
-
-**Key Features**:
-- Support for `~`, `.`, `..`, `-`, and directory names
-- Previous directory tracking
-- Sequential argument processing
-
-**Challenges & Solutions**:
-- **Challenge**: Handling `..` navigation without going beyond root
-- **Solution**: String manipulation to find parent directory safely
-- **Challenge**: Previous directory tracking across multiple hops
-- **Solution**: Maintained `prev_directory` pointer in main loop
-
-#### B.2: reveal Command 
-**Implementation**: `command_reveal()` in `builtins.c`
-
-**Key Features**:
-- `-a` flag for hidden files
-- `-l` flag for line-by-line output
-- Lexicographic sorting
-- Directory navigation support
-
-**Challenges & Solutions**:
-- **Challenge**: Lexicographic sorting implementation
-- **Solution**: Bubble sort algorithm with `my_strcmp()` function
-- **Challenge**: Flag parsing and validation
-- **Solution**: Character-by-character flag parsing with proper validation
-
-#### B.3: log Command 
-**Implementation**: `command_log()` in `builtins.c` with history management in `job_control.c`
-
-**Key Features**:
-- Persistent history across shell sessions
-- `purge` and `execute` subcommands
-- Duplicate command filtering
-- File-based storage
-
-**Challenges & Solutions**:
-- **Challenge**: Persistent storage across sessions
-- **Solution**: File-based history with `.shell_history` file
-- **Challenge**: Memory management for history storage
-- **Solution**: Circular buffer implementation with proper cleanup
-
-### Part C: File Redirection and Pipes 
-
-#### C.1: Command Execution
-**Implementation**: `executor()` and `child_process()` in `excecutor.c`
-
-**Key Features**:
-- PATH environment variable searching
-- Current directory execution fallback
-- Proper error handling for missing commands
-
-#### C.2: Input Redirection 
-**Implementation**: `execute_single_command()` in `excecutor.c`
-
-**Key Features**:
-- `open()` with `O_RDONLY` flag
-- `dup2()` for stdin redirection
-- File descriptor leak prevention
-
-#### C.3: Output Redirection 
-**Implementation**: `execute_single_command()` in `excecutor.c`
-
-**Key Features**:
-- `>` for truncation, `>>` for appending
-- `O_TRUNC` and `O_APPEND` flags
-- Proper file creation with permissions
-
-#### C.4: Command Piping 
-**Implementation**: `execute_pipeline()` in `excecutor.c`
-
-**Key Features**:
-- `pipe()` system call for inter-process communication
-- Multiple process forking
-- Proper file descriptor management
-- Pipeline completion waiting
-
-**Challenges & Solutions**:
-- **Challenge**: Complex file descriptor management
-- **Solution**: Careful `dup2()` usage and proper cleanup
-- **Challenge**: Pipeline error handling
-- **Solution**: Continue execution even if individual commands fail
-
-### Part D: Sequential and Background Execution 
-
-#### D.1: Sequential Execution 
-**Implementation**: `parse_command_sequence()` and `execute_command_sequence()` in `parser.c` and `excecutor.c`
-
-**Key Features**:
-- Semicolon (`;`) command separation
-- Sequential execution with proper waiting
-- Error handling for individual commands
-
-**Challenges & Solutions**:
-- **Challenge**: Parsing mixed operators (`;`, `&`, `|`)
-- **Solution**: Hierarchical parsing with operator precedence
-- **Challenge**: Memory management for command sequences
-- **Solution**: Proper cleanup functions for all allocated structures
-
-#### D.2: Background Execution 
-**Implementation**: Job control system in `job_control.c`
-
-**Key Features**:
-- Background process tracking
-- Job number assignment
-- Process status monitoring
-- Automatic cleanup of completed processes
-
-**Challenges & Solutions**:
-- **Challenge**: Background process tracking
-- **Solution**: Global job array with PID tracking
-- **Challenge**: Process completion detection
-- **Solution**: `waitpid()` with `WNOHANG` flag for non-blocking checks
-
-### Part E: Exotic Shell Intrinsics 
-
-#### E.1: activities Command 
-**Implementation**: `command_activities()` in `builtins.c`
-
-**Key Features**:
-- Process listing with status
-- Lexicographic sorting by command name
-- Automatic cleanup of terminated processes
-
-#### E.2: ping Command 
-**Implementation**: `command_ping()` in `builtins.c`
-
-**Key Features**:
-- Signal number modulo 32
-- Process existence validation
-- Proper error handling
-
-#### E.3: Signal Handling 
-**Implementation**: Signal handlers in `job_control.c`
-
-**Key Features**:
-- `SIGINT` (Ctrl-C) handling
-- `SIGTSTP` (Ctrl-Z) handling
-- `SIGCHLD` management
-- Process group management
-
-**Challenges & Solutions**:
-- **Challenge**: Signal handler implementation
-- **Solution**: Proper signal registration and handler functions
-- **Challenge**: Process group management
-- **Solution**: `setpgid()` and `tcsetpgrp()` for proper foreground/background handling
-
-#### E.4: fg and bg Commands 
-**Implementation**: `command_fg()` and `command_bg()` in `builtins.c`
-
-**Key Features**:
-- Job number resolution
-- Process resumption with `SIGCONT`
-- Proper job state management
-
-## 🚧 Major Challenges and Solutions
-
-### 1. Memory Management
-**Challenge**: Double-free errors and memory leaks
-**Solution**: 
-- Careful tracking of allocated memory
-- Proper cleanup functions for all data structures
-- Avoiding freeing system-managed environment variables
-
-### 2. Complex Parsing
-**Challenge**: Implementing the complex grammar with proper error handling
-**Solution**:
-- Recursive descent parsing
-- Comprehensive error checking at each level
-- Proper tokenization with whitespace handling
-
-### 3. Job Control
-**Challenge**: Managing background processes and job states
-**Solution**:
-- Global job tracking array
-- Proper process group management
-- Non-blocking process status checking
-
-### 4. Signal Handling
-**Challenge**: Proper signal handling without breaking shell functionality
-**Solution**:
-- Signal handler registration
-- Process group management
-- Proper signal forwarding to child processes
-
-### 5. File Descriptor Management
-**Challenge**: Complex file descriptor handling in pipelines
-**Solution**:
-- Careful `dup2()` usage
-- Proper cleanup of all file descriptors
-- Error handling for failed redirections
-
-## 🔍 Key Design Decisions
-
-### 1. Modular Architecture
-- Separated concerns into different source files
-- Clear interfaces between modules
-- Reusable utility functions
-
-### 2. Memory Safety
-- Consistent memory management patterns
-- Proper cleanup functions
-- Avoiding double-free errors
-
-### 3. Error Handling
-- Comprehensive error checking
-- Graceful degradation
-- User-friendly error messages
-
-### 4. POSIX Compliance
-- Strict adherence to POSIX standards
-- Proper use of system calls
-- Cross-platform compatibility
-
-
-
-Build and demo – Networking
-    # S.H.A.M. Protocol Implementation
-
-A reliable UDP protocol implementation that simulates TCP functionality, including connection management, data sequencing, retransmission, flow control, and both file transfer and real-time chat modes.
-
-## Overview
-
-This project implements a custom protocol called S.H.A.M. (Sequence, Handshake, Acknowledgment, Management) that provides reliable communication over UDP. The implementation includes:
-
-- **S.H.A.M. Packet Structure**: Custom header with sequence numbers, acknowledgments, flags, and window size
-- **Connection Management**: 3-way handshake for establishment, 4-way handshake for termination
-- **Data Sequencing**: 1024-byte data chunks with sequence numbers
-- **Retransmission**: Timeout-based retransmission for lost packets
-- **Flow Control**: Sliding window mechanism
-- **Cumulative ACKs**: Efficient acknowledgment system
-- **Packet Loss Simulation**: Configurable packet loss for testing
-- **Verbose Logging**: Detailed logging with microsecond timestamps
-- **Dual Modes**: File transfer and real-time chat
-
-### 1. S.H.A.M. Packet Structure 
-- **Sequence Number (seq_num)**: 32-bit field indicating byte-stream position
-- **Acknowledgment Number (ack_num)**: 32-bit field for cumulative ACKs
-- **Flags (flags)**: 16-bit field supporting SYN, ACK, FIN flags
-- **Window Size (window_size)**: 16-bit field for flow control
-
-### 2. Connection Management 
-- **3-Way Handshake**: SYN → SYN-ACK → ACK for connection establishment
-- **4-Way Handshake**: FIN → ACK → FIN → ACK for connection termination
-- **State Management**: Proper connection state tracking
-
-### 3. Data Sequencing and Retransmission 
-- **Data Segmentation**: Files split into 1024-byte chunks
-- **Sliding Window**: Configurable window size (default: 10 packets)
-- **Cumulative ACKs**: Efficient acknowledgment of received data
-- **Retransmission Timeout (RTO)**: 500ms timeout for packet retransmission
-- **Selective Retransmission**: Only retransmit lost packets
-
-### 4. Flow Control 
-- **Window Size Management**: Dynamic window size based on receiver capacity
-- **Buffer Management**: Proper handling of receiver buffer space
-- **Congestion Control**: Basic flow control mechanisms
-
-### 5. Implementation and Testing 
-- **Command-Line Interface**: Proper argument parsing for both modes
-- **File Transfer Mode**: Complete file transfer with MD5 verification
-- **Chat Mode**: Real-time chat using select() for concurrent I/O
-- **Standardized Output**: MD5 checksum output in required format
-
-### 6. Packet Loss Simulation 
-- **Configurable Loss Rate**: 0.0 to 1.0 probability
-- **Testing Support**: Enables testing of retransmission logic
-- **Logging**: DROP events logged when packets are lost
-
-### 7. Verbose Logging 
-- **Environment Variable**: RUDP_LOG=1 enables logging
-- **Microsecond Timestamps**: High-precision timing using gettimeofday()
-- **Comprehensive Events**: All protocol events logged with timestamps
-- **Separate Log Files**: server_log.txt and client_log.txt
-
-
-```bash
-brew install openssl
-```
-
-```bash
-make clean && make
-```
-
-**Server:**
-```bash
+cd network
+make
 ./server <port> [--chat] [loss_rate]
+./client <server_ip> <port> <input_file> <output_file> [loss_rate]
+./client <server_ip> <port> --chat [loss_rate]
 ```
 
-**Client - File Transfer Mode:**
-```bash
-./client <server_ip> <server_port> <input_file> <output_file_name> [loss_rate]
-```
+`RUDP_LOG=1` writes a timestamped event log to `server_log.txt` and
+`client_log.txt`. The server prints the MD5 of a received file.
 
-**Client - Chat Mode:**
-```bash
-./client <server_ip> <server_port> --chat [loss_rate]
-```
+## xv6
 
-**Basic File Transfer:**
-```bash
-# Terminal 1
-./server 8080
-
-# Terminal 2
-./client 127.0.0.1 8080 input.txt output.txt
-```
-
-**Chat Mode:**
-```bash
-# Terminal 1
-./server 8080 --chat
-
-# Terminal 2
-./client 127.0.0.1 8080 --chat
-```
-
-**With Packet Loss Simulation:**
-```bash
-# Terminal 1
-./server 8080 0.1  # 10% packet loss
-
-# Terminal 2
-./client 127.0.0.1 8080 input.txt output.txt 0.1
-```
-
-**With Verbose Logging:**
-```bash
-# Terminal 1
-RUDP_LOG=1 ./server 8080
-
-# Terminal 2
-RUDP_LOG=1 ./client 127.0.0.1 8080 input.txt output.txt
-```
-
-## Protocol Details
-
-### S.H.A.M. Header Format
-
-```c
-struct sham_header {
-    uint32_t seq_num;      // Sequence Number
-    uint32_t ack_num;      // Acknowledgment Number
-    uint16_t flags;        // Control flags (SYN, ACK, FIN)
-    uint16_t window_size;  // Flow control window size
-} __attribute__((packed));
-```
-
-### Flag Definitions
-
-- `SYN_FLAG (0x1)`: Synchronize - connection initiation
-- `ACK_FLAG (0x2)`: Acknowledge - acknowledgment field significant
-- `FIN_FLAG (0x4)`: Finish - connection termination
-
-### Connection States
-
-- `CLOSED`: No connection
-- `LISTEN`: Server waiting for connection
-- `SYN_SENT`: Client sent SYN, waiting for SYN-ACK
-- `SYN_RCVD`: Server received SYN, sent SYN-ACK
-- `ESTABLISHED`: Connection established
-- `FIN_WAIT_1`: First FIN sent
-- `FIN_WAIT_2`: ACK for first FIN received
-- `CLOSE_WAIT`: FIN received, waiting to close
-- `LAST_ACK`: FIN sent, waiting for ACK
-- `TIME_WAIT`: Final ACK received
-
-## Logging Format
-
-When `RUDP_LOG=1` is set, the following events are logged:
-
-```
-[YYYY-MM-DD HH:MM:SS.microseconds] [LOG] <event_description>
-```
-
-**Example Log Entries:**
-```
-[2025-09-13 13:17:07.366927] [LOG] RCV SYN SEQ=4196707724
-[2025-09-13 13:17:07.367512] [LOG] SND SYN-ACK SEQ=4196708388 ACK=4196707725
-[2025-09-13 13:17:07.367627] [LOG] RCV ACK FOR SYN
-[2025-09-13 13:17:07.367738] [LOG] RCV DATA SEQ=1 LEN=22
-[2025-09-13 13:17:07.367769] [LOG] SND ACK=23 WIN=8192
-```
-
-## Implementation Notes
-
-### Retransmission Logic
-- Each sent packet is buffered with a timestamp
-- Timeout checking occurs during data transmission
-- Only unacknowledged packets are retransmitted
-- RTO is set to 500ms (configurable)
-
-### Flow Control
-- Receiver advertises available buffer space in window_size field
-- Sender respects advertised window size
-- Window size is updated based on ACK reception
-
-### Error Handling
-- Graceful handling of packet loss
-- Proper connection termination
-- Comprehensive error logging
-
-## Performance Characteristics
-
-- **Throughput**: Limited by window size and RTO settings
-- **Latency**: RTO-based retransmission adds latency for lost packets
-- **Reliability**: High reliability through retransmission and ACKs
-- **Efficiency**: Cumulative ACKs reduce network overhead
-
-Build and run – xv6
-
-1) Prereqs: RISC-V toolchain and qemu installed
-
-2) Build kernel (default RR)
-   make -C xv6
-
-3) Alternate schedulers
-   make -C xv6 clean && make -C xv6 SCHEDULER=FCFS
-   make -C xv6 clean && make -C xv6 SCHEDULER=CFS
-
-4) Run
-   make -C xv6 qemu
-
-5) System call demo inside xv6
-   readcount
-
-Notes for submission
-
-- xv6/xv6_modifications.patch contains only files we modified or added (not the whole xv6 tree):
-  - Makefile, kernel/{{proc.c,proc.h,syscall.c,sysfile.c,syscall.h,trap.c}}, user/{{user.h,usys.pl,readcount.c,schedulertest.c}}, report.md
-- Networking server prints MD5 on successful file reception as required.
-- Shell builds with make all in shell/ and passes the included tester.
-
-
+`xv6/xv6_modifications.patch` adds the `getreadcount` system call and FCFS
+and CFS schedulers, chosen at build time with `make SCHEDULER=FCFS` or
+`make SCHEDULER=CFS`. `xv6/report.md` describes the design.
