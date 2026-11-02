@@ -198,6 +198,10 @@ static void retransmit_oldest(struct sham_conn *c, const char *why)
     else
         sham_log("RETX DATA SEQ=%u LEN=%u", s->seq, (unsigned)s->len);
     c->retransmissions++;
+    if (!c->recovering) {
+        c->recovering = 1;
+        c->recover = c->snd_nxt;
+    }
 }
 
 /* sends new packets from the send buffer while both windows allow it */
@@ -242,7 +246,7 @@ static void transmit(struct sham_conn *c)
     }
 }
 
-static void handle_ack(struct sham_conn *c, uint32_t ack, uint16_t win)
+static void handle_ack(struct sham_conn *c, uint32_t ack, uint16_t win, int pure)
 {
     if (seq_before(ack, c->snd_una) || seq_before(c->snd_nxt, ack))
         return; /* older than what we know, or for data never sent */
@@ -257,6 +261,18 @@ static void handle_ack(struct sham_conn *c, uint32_t ack, uint16_t win)
         memmove(c->flight, c->flight + k, (size_t)(c->nflight - k) * sizeof c->flight[0]);
         c->nflight -= k;
         c->snd_una = ack;
+        c->dupacks = 0;
+        /* A partial ACK: the retransmission filled one gap, and the ACK
+           stops at the next. That packet went out before the one just
+           retransmitted, so it is lost too; resend it now (TCP NewReno). */
+        if (c->recovering && seq_before(ack, c->recover) && c->nflight > 0)
+            retransmit_oldest(c, "PARTIAL ACK");
+        else
+            c->recovering = 0;
+    } else if (pure && c->nflight > 0 && ++c->dupacks == DUP_ACK_THRESHOLD) {
+        /* each packet after a gap repeats the same ACK; several in a row
+           mean the oldest packet is lost, so don't wait for its timer */
+        retransmit_oldest(c, "FAST RETRANSMIT");
     }
     if (win != c->snd_wnd) {
         sham_log("FLOW WIN UPDATE=%u", win);
@@ -366,9 +382,10 @@ static void handle_packet(struct sham_conn *c, const unsigned char *buf, size_t 
     }
     c->last_heard = now_ms();
     if (flags & ACK_FLAG) {
-        if (len == 0 && !(flags & FIN_FLAG))
+        int pure = len == 0 && !(flags & FIN_FLAG);
+        if (pure)
             sham_log("RCV ACK=%u", ack);
-        handle_ack(c, ack, win);
+        handle_ack(c, ack, win, pure);
     }
     if (len > 0)
         handle_data(c, seq, data, len);

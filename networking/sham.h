@@ -28,6 +28,9 @@ typedef char sham_header_is_12_bytes[sizeof(struct sham_header) == 12 ? 1 : -1];
 #define RTO_MS 500            /* retransmission timeout */
 #define HANDSHAKE_TRIES 10    /* SYN and SYN-ACK attempts before giving up */
 #define PEER_TIMEOUT_MS 10000 /* give up when the peer is silent this long */
+#ifndef DUP_ACK_THRESHOLD
+#define DUP_ACK_THRESHOLD 3   /* duplicate ACKs that trigger a fast retransmit, 0 to turn it off */
+#endif
 
 struct sham_segment {
     uint32_t seq;
@@ -54,6 +57,9 @@ struct sham_conn {
     uint16_t snd_wnd;               /* window the peer advertised */
     struct sham_segment flight[WINDOW_PACKETS]; /* sent but not acknowledged, oldest first */
     int nflight;
+    int dupacks;
+    int recovering;                 /* retransmitted, and waiting for ACKs up to recover */
+    uint32_t recover;
     char sndbuf[SND_BUFFER];        /* written by the application, not yet sent */
     size_t snd_start, snd_len;
     int fin_queued, fin_sent, fin_acked;
