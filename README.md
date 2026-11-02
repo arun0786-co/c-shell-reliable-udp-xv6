@@ -4,7 +4,7 @@ Three systems programs in C, written for Mini Project 1 of Operating Systems
 and Networks at IIIT Hyderabad (2025) and reworked later:
 
 - `shell/`: a shell with pipes, redirection and job control
-- `network/`: S.H.A.M., a reliable byte stream over UDP
+- `networking/`: S.H.A.M., a reliable byte stream over UDP
 - `xv6/`: a `getreadcount` system call and extra schedulers for xv6, as a patch
 
 ## Shell
@@ -123,7 +123,7 @@ cumulative ACKs, retransmission on timeout, a sliding window, simulated
 packet loss and a chat mode.
 
 ```
-cd network
+cd networking
 make
 ./server <port> [--chat] [loss_rate]
 ./client <server_ip> <port> <input_file> <output_file> [loss_rate]
