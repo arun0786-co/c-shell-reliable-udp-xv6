@@ -118,20 +118,107 @@ are described in the next section.
 
 ## Networking: S.H.A.M.
 
-A reliable byte stream over UDP with a three-way handshake, sequence numbers,
-cumulative ACKs, retransmission on timeout, a sliding window, simulated
-packet loss and a chat mode.
+A reliable byte stream over UDP: three-way handshake, byte sequence numbers,
+cumulative ACKs, a sliding window with flow control, retransmission,
+simulated packet loss, and a chat mode.
 
 ```
 cd networking
-make
+make        # the server needs OpenSSL for MD5 (libssl-dev, or brew install openssl@3)
 ./server <port> [--chat] [loss_rate]
-./client <server_ip> <port> <input_file> <output_file> [loss_rate]
-./client <server_ip> <port> --chat [loss_rate]
+./client <server_ip> <server_port> <input_file> <output_file_name> [loss_rate]
+./client <server_ip> <server_port> --chat [loss_rate]
+make test   # 20 checks on 127.0.0.1
 ```
 
-`RUDP_LOG=1` writes a timestamped event log to `server_log.txt` and
-`client_log.txt`. The server prints the MD5 of a received file.
+In file mode the server saves the file as `<output_file_name>` in its own
+directory and, once the connection is closed, prints only
+`MD5: <hash>` on stdout. The client prints a one-line summary on stderr. In
+chat mode `/quit`, Ctrl-D or Ctrl-C starts the close, and the other side
+closes too. `loss_rate` makes the receiving side drop incoming data packets
+with that probability; in file mode only the server receives data, so the
+client's rate has no effect there. `RUDP_LOG=1` writes the event log to
+`server_log.txt` or `client_log.txt`.
+
+### How it works
+
+- `sham.c` is the transport, shared by both programs and both modes. The
+  application writes bytes into a send buffer and calls `sham_poll` in a
+  loop. `sham_poll` waits with `select` for a packet, a timer or the
+  application's own descriptor (stdin in chat mode), then sends what the
+  windows allow, retransmits, and passes in-order data to a callback that
+  writes the file or prints the message.
+- Sequence numbers count bytes from a random initial number. SYN and FIN use
+  one number each, so the ACK of a FIN cannot be mistaken for the ACK of the
+  last data byte. Sequence numbers are compared through their 32-bit
+  difference, so comparisons still work when the numbers wrap around.
+- At most 10 packets are in flight, and never more unacknowledged bytes than
+  the receiver advertised. The receiver's window is its 16 KiB buffer minus
+  the span of out-of-order data it holds (in-order data is handed over at
+  once), so the window shrinks after a loss and opens again when the gap is
+  filled.
+- Each packet keeps its own send time. When the oldest unacknowledged packet
+  is 500 ms old, that packet alone is retransmitted: the later ones have
+  probably arrived, and a cumulative ACK cannot tell. Three duplicate ACKs
+  retransmit it at once (fast retransmit). During recovery, an ACK that stops
+  at the next gap retransmits that packet too.
+- SYN, SYN-ACK and FIN are retransmitted as well, so a lost control packet
+  cannot hang either side. The side whose FIN went first waits 1 s before
+  exiting, so it can answer the other FIN again if its last ACK was lost
+  (TCP's TIME_WAIT).
+- The stream starts with the output file name and a NUL byte. The server
+  keeps only the last path component of the name, writes to `<name>.part`,
+  and renames it when the transfer is complete.
+- Timers use `CLOCK_MONOTONIC`, and only the log timestamps use
+  `gettimeofday`. In the Docker VM used for testing, the wall clock jumped
+  4.6 s back and forth every few seconds. Timers on that clock would have
+  fired late or early.
+
+### Changes from the submitted version
+
+The submitted version was stop-and-wait with no timers, so it only worked
+when nothing was lost.
+
+- A lost data packet or ACK left both programs blocked in `recvfrom` forever.
+- The client applied the loss rate to its own sends and skipped the lost
+  chunk for good: with 20% loss the server saved 159040 of 200000 bytes,
+  printed a wrong MD5 and exited 0.
+- The server did not buffer out-of-order packets and always advertised the
+  same window, and the sender never read the window.
+- Data started at sequence number 1 instead of ISN + 1, and the client sent
+  two FINs from two different sequence spaces.
+- In chat mode, `len` was read before it was set, so the code wrote to
+  `data[-12]` and printed bytes past the end of the message. `/quit` on
+  either side deadlocked both programs, and end of input made `select` spin.
+- The output file name never reached the server, which always wrote
+  `received_file_<port>`.
+- The server printed status lines on stdout next to the MD5 line, and
+  printed the MD5 before the connection was closed.
+- MD5 used OpenSSL's deprecated `MD5_*` functions, and the Makefile's
+  `brew --prefix openssl` now names an OpenSSL version that may not be
+  installed, so the build failed on macOS.
+
+### Testing
+
+`make test` covers files of 0 bytes to 1 MiB at 0 to 50% loss, the log
+format and the required log events, the 10-packet and advertised windows
+(checked by replaying the client log), chat in both directions with each
+side quitting and with 30% loss, and error cases. It passes on macOS and on
+Linux, including builds with AddressSanitizer and UBSan.
+
+Separately, transfers went through a UDP proxy that dropped packets of every
+kind in both directions (handshake, ACKs and FINs included), duplicated some
+and reordered some. All 10 runs at 15% drop and all 8 runs at 40% drop
+arrived with the right MD5.
+
+Time to send 1 MiB on Linux, three runs each, including the 1 s wait at the
+end:
+
+| Data packets lost | Timeout only | With fast retransmit |
+|---|---|---|
+| 5% | 17.7 to 25.7 s | 1.5 to 2.5 s |
+| 10% | 30.8 to 34.8 s | 5.0 to 6.6 s |
+| 20% | 59.5 to 70.1 s | 17.2 to 21.7 s |
 
 ## xv6
 
