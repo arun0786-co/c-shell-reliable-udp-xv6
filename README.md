@@ -222,6 +222,61 @@ end:
 
 ## xv6
 
-`xv6/xv6_modifications.patch` adds the `getreadcount` system call and FCFS
-and CFS schedulers, chosen at build time with `make SCHEDULER=FCFS` or
-`make SCHEDULER=CFS`. `xv6/report.md` describes the design.
+`xv6/xv6_modifications.patch` applies to
+[mit-pdos/xv6-riscv](https://github.com/mit-pdos/xv6-riscv) at commit
+`9dbd536` and adds:
+
+- `getreadcount()`: the bytes returned by `read()` since boot, wrapping
+  around to 0 after 2^32 - 1
+- FCFS and CFS schedulers next to xv6's round robin, chosen at build time
+- `waitx()` and `schedulertest`, which report how long processes ran and
+  waited
+- `setnice()` and `nicetest`, which give CFS processes different weights
+
+```
+git clone https://github.com/mit-pdos/xv6-riscv && cd xv6-riscv
+git checkout 9dbd536
+git apply ../xv6/xv6_modifications.patch
+make qemu SCHEDULER=CFS CPUS=1    # RR, FCFS or CFS; Ctrl-A x quits qemu
+```
+
+`xv6/report.md` explains the implementation, shows the CFS log and compares
+the three policies. `python3 xv6/test.py` clones xv6, applies the patch, and
+builds and checks each policy in qemu. It needs a RISC-V gcc and
+qemu-system-riscv64 (on Debian or Ubuntu,
+`apt install gcc-riscv64-linux-gnu qemu-system-misc`). The MLFQ bonus is not
+implemented.
+
+### Changes from the submitted version
+
+The submitted patch was applied to the upstream commit it was made against
+and run in qemu.
+
+- The patch did not change the Makefile. `SCHEDULER=` was ignored, so every
+  build ran round robin, and `readcount` was never built into the file
+  system.
+- `schedulertest.c` did not compile: it called `yield()`, which user
+  programs do not have, and `sleep()`, which this xv6 calls `pause()`.
+- With the CFS flag added by hand, the kernel panicked at boot with
+  `panic: acquire`, because the log loop locked the chosen process a second
+  time.
+- With that fixed, CFS ran each process to completion before starting the
+  next. `vruntime` grew by `run_time * 1024 / weight` in integer division,
+  which is 0 for one tick at weight 1365, so three spinning processes all
+  stayed at 0 and the first of them in the process table always won. The
+  weight table itself was made up: nice 0 had weight 1365 and nice 19 had
+  26, where the spec says 1024 and 15.
+- The CFS time slice was computed but never used, nothing kept processes in
+  `vruntime` order, and there was no way to change a nice value.
+- FCFS still yielded on every tick, so a process that woke up took the CPU
+  from the running one if it was older. In `schedulertest` the sleeping
+  children ran the moment they woke at tick 200, instead of waiting for the
+  running child to finish.
+- Every CPU added to the read counter with a plain `+=`. On 8 CPUs, 7
+  processes making 30000 one-byte reads each lost 3 to 6 counts in every one
+  of 5 runs. The counter was 64 bits but returned as an `int`, so after 2^31
+  bytes it would have turned negative instead of wrapping to 0.
+- `global_time`, used both as a clock and for creation order, was
+  incremented without a lock by every CPU's timer and by every fork.
+- The report described work the code did not do (inserting by `vruntime`,
+  thread safety, the Makefile change) and had no measurements.
