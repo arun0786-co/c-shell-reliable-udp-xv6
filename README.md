@@ -1,5 +1,11 @@
 # C shell, reliable UDP and xv6 schedulers
 
+This repo is archived. Each part moved to its own repo and kept growing there:
+
+- [c-job-control-shell](https://github.com/arun0786-co/c-job-control-shell)
+- [sham-reliable-udp](https://github.com/arun0786-co/sham-reliable-udp)
+- [xv6-schedulers](https://github.com/arun0786-co/xv6-schedulers)
+
 Three systems programs in C, written for Mini Project 1 of Operating Systems
 and Networks at IIIT Hyderabad (2025) and reworked later:
 
